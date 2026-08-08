@@ -37,6 +37,8 @@ This starter does not use `wrangler.jsonc`.
 - `.openai/hosting.json` declares the `DB` D1 summary-cache binding
 - `vite.config.ts` simulates declared bindings for local development
 - `db/schema.ts` defines the D1-backed AI summary cache
+- `drizzle/0001_fixed_purple_man.sql` adds an atomic D1 lease so concurrent
+  requests for the same story cannot fan out to the AI provider
 - `examples/d1/` contains an optional D1 example surface
 - `drizzle.config.ts` supports local migration generation when needed
 
@@ -106,6 +108,12 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm run build`: verify the vinext build output
 - `npm test`: build the app and run rendered-HTML and security-focused tests
 - `npm run db:generate`: generate Drizzle migrations after schema changes
+
+Summary requests are limited per client, coalesced within a worker isolate, and
+guarded by the D1 `summary_generation_lease` table across isolates. Apply all
+Drizzle migrations before deploying. Keep a shared edge/API quota in front of
+the Worker as an additional budget control; the in-process limiter is not a
+replacement for a distributed gateway limit.
 
 ## Learn More
 

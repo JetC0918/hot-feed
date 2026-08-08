@@ -39,7 +39,8 @@ export async function fetchArticleExcerpt(initialUrl: string, sourceId: string, 
       continue;
     }
     if (!response.ok) throw new Error("Article unavailable");
-    if (!(response.headers.get("content-type") ?? "").toLowerCase().includes("text/html")) throw new Error("Article is not HTML");
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0].trim();
+    if (contentType !== "text/html" && contentType !== "application/xhtml+xml") throw new Error("Article is not HTML");
     const contentLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(contentLength) && contentLength > 150_000) throw new Error("Article is too large");
     const reader = response.body?.getReader();
@@ -50,7 +51,10 @@ export async function fetchArticleExcerpt(initialUrl: string, sourceId: string, 
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 150_000) break;
+      if (size > 150_000) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("Article is too large");
+      }
       chunks.push(value);
     }
     await reader.cancel().catch(() => undefined);

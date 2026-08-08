@@ -10,3 +10,9 @@ export const summaryCache = sqliteTable("summary_cache", {
   createdAt: integer("created_at").notNull(),
   lastAccessedAt: integer("last_accessed_at").notNull(),
 });
+
+export const summaryGenerationLease = sqliteTable("summary_generation_lease", {
+  urlHash: text("url_hash").primaryKey(),
+  leaseId: text("lease_id").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+});
