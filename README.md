@@ -2,12 +2,11 @@
 
 HotFeed is a focused Reddit reader for viewing the hot or newest posts from a
 single subreddit. It is a static Vite + React site with one Cloudflare Pages
-Function that keeps Reddit OAuth credentials on the server.
+Function that proxies Reddit's public RSS feed.
 
 ## Requirements
 
 - Node.js `>=22.13.0`
-- A Reddit application with Data API access
 - A Cloudflare account for Pages deployment
 
 ## Local setup
@@ -18,17 +17,14 @@ Install dependencies:
 npm install
 ```
 
-Create an ignored `.dev.vars` file from `.env.example` and fill in the three
-server-only values:
+Create an ignored `.dev.vars` file from `.env.example` if you want to customize
+the User-Agent. The value is optional because the Function has a safe default:
 
 ```text
-REDDIT_CLIENT_ID=
-REDDIT_CLIENT_SECRET=
-REDDIT_USER_AGENT=web:hot-feed:0.2.0 (by /u/your_reddit_username)
+REDDIT_USER_AGENT=web:hot-feed:0.2.0 (RSS reader)
 ```
 
-Never prefix these names with `VITE_`; Vite exposes variables with that prefix
-to browser code.
+Do not put secrets in browser-exposed `VITE_` variables.
 
 Run the full Pages application locally:
 
@@ -49,9 +45,9 @@ use:
 - Root directory: leave blank
 - Node version: 22
 
-Add `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, and `REDDIT_USER_AGENT` under
-the Pages project's **Settings → Variables and Secrets** for both production
-and preview environments. No D1 database or binding is required.
+No Reddit secrets or database bindings are required. You may add
+`REDDIT_USER_AGENT` under the Pages project's **Settings → Variables and
+Secrets** for production and preview, or use the built-in default.
 
 Cloudflare automatically deploys `functions/api/reddit.ts` alongside the static
 assets. You can also deploy from an authenticated local Wrangler session:
@@ -78,6 +74,6 @@ npm run deploy
 - `sort`: `hot` or `new`
 - `limit`: 1–50
 
-Successful Reddit responses are normalized to a small browser-safe contract and
-cached at the edge for two minutes. Upstream bodies and credentials are never
-included in error responses.
+Successful RSS responses are normalized to a small browser-safe contract and
+cached at the edge for two minutes. RSS does not reliably provide score or
+comment counts, so the UI links to the Reddit discussion instead.

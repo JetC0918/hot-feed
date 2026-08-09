@@ -205,11 +205,10 @@ export default function App() {
                       </div>
                       <h3><a href={post.outboundUrl} target="_blank" rel="noreferrer">{post.title}</a></h3>
                       <div className="post-footer">
-                        <span>▲ {post.score.toLocaleString()}</span>
                         <a href={post.permalink} target="_blank" rel="noreferrer">
-                          {post.commentCount.toLocaleString()} comments
+                          Open Reddit discussion
                         </a>
-                        <span className="source-label">{post.isSelfPost ? "Reddit post" : "External link"}</span>
+                        <span className="source-label">Reddit RSS</span>
                       </div>
                     </div>
                     {post.thumbnailUrl && <img className="post-thumbnail" src={post.thumbnailUrl} alt="" loading="lazy" />}

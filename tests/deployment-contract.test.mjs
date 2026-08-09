@@ -37,11 +37,10 @@ test("package and source tree describe a static Vite Pages app", async () => {
   assert.match(functionSource, /handleRedditFeedRequest/);
 });
 
-test("environment template contains only the Reddit server credentials", async () => {
+test("environment template contains only an optional Reddit user agent", async () => {
   const template = await readFile(path.join(root, ".env.example"), "utf8");
-  for (const name of ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USER_AGENT"]) {
-    assert.match(template, new RegExp(`^${name}=`, "m"));
-  }
+  assert.match(template, /^REDDIT_USER_AGENT=/m);
+  assert.doesNotMatch(template, /REDDIT_CLIENT_ID|REDDIT_CLIENT_SECRET/);
   assert.doesNotMatch(template, /API_KEY|PROTOTYPE_AUTH|SESSION_SECRET|DATABASE|\bDB=/);
 });
 
@@ -63,6 +62,16 @@ test("browser-owned modules do not reference Reddit credential names", async () 
   ];
   const source = (await Promise.all(files.map((file) => readFile(file, "utf8")))).join("\n");
   assert.doesNotMatch(source, /REDDIT_CLIENT_ID|REDDIT_CLIENT_SECRET|REDDIT_USER_AGENT/);
+});
+
+test("production source has no Reddit OAuth credential boundary", async () => {
+  const files = [
+    ...await sourceFilesBelow(path.join(root, "app")),
+    ...await sourceFilesBelow(path.join(root, "functions")),
+    ...await sourceFilesBelow(path.join(root, "lib")),
+  ];
+  const source = (await Promise.all(files.map((file) => readFile(file, "utf8")))).join("\n");
+  assert.doesNotMatch(source, /REDDIT_CLIENT_ID|REDDIT_CLIENT_SECRET|access_token|oauth\.reddit\.com/);
 });
 
 test("Pages Function returns an edge-cached feed without contacting Reddit", async () => {

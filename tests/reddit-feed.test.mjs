@@ -3,37 +3,25 @@ import test from "node:test";
 import * as feed from "../functions/_lib/reddit.ts";
 
 const env = {
-  REDDIT_CLIENT_ID: "client-id",
-  REDDIT_CLIENT_SECRET: "client-secret",
   REDDIT_USER_AGENT: "web:hot-feed:test (by /u/example)",
 };
 
-function redditListing() {
-  return {
-    data: {
-      children: [
-        {
-          kind: "t3",
-          data: {
-            id: "abc123",
-            title: "A useful release",
-            author: "builder",
-            score: 321,
-            num_comments: 45,
-            created_utc: 1_800_000_000,
-            permalink: "/r/webdev/comments/abc123/a_useful_release/",
-            url: "https://example.com/release",
-            is_self: false,
-            thumbnail: "https://preview.redd.it/abc123.jpg",
-          },
-        },
-      ],
-    },
-  };
-}
+const rssFeed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>webdev</title>
+    <item>
+      <title><![CDATA[A useful &amp; tested release]]></title>
+      <link>https://www.reddit.com/r/webdev/comments/abc123/a_useful_release/</link>
+      <guid isPermaLink="false">t3_abc123</guid>
+      <pubDate>Wed, 15 Jan 2027 08:00:00 GMT</pubDate>
+      <dc:creator><![CDATA[builder]]></dc:creator>
+      <description><![CDATA[<p>Post body</p>]]></description>
+    </item>
+  </channel>
+</rss>`;
 
 test("feed query accepts Reddit names and bounds sort and limit", () => {
-  assert.equal(typeof feed.parseFeedQuery, "function");
   assert.deepEqual(
     feed.parseFeedQuery(new URL("https://hotfeed.test/api/reddit?subreddit=r%2FWebDev&sort=new&limit=12")),
     { subreddit: "webdev", sort: "new", limit: 12 },
@@ -53,37 +41,30 @@ test("feed query accepts Reddit names and bounds sort and limit", () => {
   }
 });
 
-test("Reddit listings are normalized into the browser feed contract", () => {
-  assert.equal(typeof feed.normalizeRedditListing, "function");
-  const response = feed.normalizeRedditListing(redditListing(), "webdev", "hot");
-  assert.deepEqual(response, {
+test("Reddit RSS entries are normalized into the browser feed contract", () => {
+  assert.equal(typeof feed.normalizeRssFeed, "function");
+  assert.deepEqual(feed.normalizeRssFeed(rssFeed, "webdev", "hot"), {
     subreddit: "webdev",
     sort: "hot",
     posts: [
       {
         id: "abc123",
-        title: "A useful release",
+        title: "A useful & tested release",
         author: "builder",
-        score: 321,
-        commentCount: 45,
         createdAt: "2027-01-15T08:00:00.000Z",
         permalink: "https://www.reddit.com/r/webdev/comments/abc123/a_useful_release/",
-        outboundUrl: "https://example.com/release",
-        isSelfPost: false,
-        thumbnailUrl: "https://preview.redd.it/abc123.jpg",
+        outboundUrl: "https://www.reddit.com/r/webdev/comments/abc123/a_useful_release/",
       },
     ],
   });
-  assert.throws(() => feed.normalizeRedditListing({ data: { children: "invalid" } }, "webdev", "hot"), /invalid/i);
+  assert.throws(() => feed.normalizeRssFeed("<html>not RSS</html>", "webdev", "hot"), /invalid/i);
 });
 
-test("feed handler uses application OAuth and returns cacheable normalized data", async () => {
-  assert.equal(typeof feed.handleRedditFeedRequest, "function");
+test("feed handler fetches RSS without OAuth and returns cacheable normalized data", async () => {
   const calls = [];
   const fetchStub = async (input, init = {}) => {
     calls.push({ url: String(input), init });
-    if (calls.length === 1) return Response.json({ access_token: "token-123", expires_in: 3600 });
-    return Response.json(redditListing());
+    return new Response(rssFeed, { headers: { "Content-Type": "application/rss+xml" } });
   };
 
   const response = await feed.handleRedditFeedRequest(
@@ -94,14 +75,11 @@ test("feed handler uses application OAuth and returns cacheable normalized data"
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("cache-control") ?? "", /s-maxage=120/);
-  assert.deepEqual(await response.json(), feed.normalizeRedditListing(redditListing(), "webdev", "hot"));
-  assert.equal(calls[0].url, "https://www.reddit.com/api/v1/access_token");
-  assert.equal(calls[0].init.method, "POST");
-  assert.match(String(calls[0].init.headers.Authorization), /^Basic /);
+  assert.deepEqual(await response.json(), feed.normalizeRssFeed(rssFeed, "webdev", "hot"));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://www.reddit.com/r/webdev/hot.rss?limit=10");
   assert.equal(calls[0].init.headers["User-Agent"], env.REDDIT_USER_AGENT);
-  assert.equal(calls[0].init.body, "grant_type=client_credentials");
-  assert.equal(calls[1].url, "https://oauth.reddit.com/r/webdev/hot?limit=10&raw_json=1");
-  assert.equal(calls[1].init.headers.Authorization, "Bearer token-123");
+  assert.equal(calls[0].init.headers.Authorization, undefined);
 });
 
 test("feed handler rejects invalid methods and requests before calling Reddit", async () => {
@@ -122,26 +100,14 @@ test("feed handler rejects invalid methods and requests before calling Reddit", 
   assert.equal(calls, 0);
 });
 
-test("feed handler fails safely when configuration or Reddit is unavailable", async () => {
-  let calls = 0;
-  const missingConfig = await feed.handleRedditFeedRequest(
-    new Request("https://hotfeed.test/api/reddit"),
-    {},
-    async () => { calls += 1; return new Response(); },
-  );
-  assert.equal(missingConfig.status, 503);
-  assert.equal(calls, 0);
-  assert.deepEqual(await missingConfig.json(), {
-    error: { code: "not_configured", message: "The Reddit feed is not configured yet." },
-  });
-
-  const oauthFailure = await feed.handleRedditFeedRequest(
+test("feed handler fails safely when RSS is unavailable", async () => {
+  const response = await feed.handleRedditFeedRequest(
     new Request("https://hotfeed.test/api/reddit"),
     env,
-    async () => new Response(`credential=${env.REDDIT_CLIENT_SECRET}`, { status: 401 }),
+    async () => new Response("upstream secret", { status: 503 }),
   );
-  assert.equal(oauthFailure.status, 502);
-  const body = JSON.stringify(await oauthFailure.json());
+  assert.equal(response.status, 502);
+  const body = JSON.stringify(await response.json());
   assert.match(body, /reddit_unavailable/);
-  assert.doesNotMatch(body, new RegExp(env.REDDIT_CLIENT_SECRET));
+  assert.doesNotMatch(body, /upstream secret/);
 });

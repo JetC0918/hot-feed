@@ -1,8 +1,6 @@
 import type { FeedPost, FeedResponse, SortMode } from "../../lib/feed-types.ts";
 
 export type RedditEnv = {
-  REDDIT_CLIENT_ID?: string;
-  REDDIT_CLIENT_SECRET?: string;
   REDDIT_USER_AGENT?: string;
 };
 
@@ -12,40 +10,54 @@ const DEFAULT_SUBREDDIT = "technology";
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 50;
 const REDDIT_TIMEOUT_MS = 8_000;
+const DEFAULT_USER_AGENT = "web:hot-feed:0.2.0 (RSS reader)";
 
 export class FeedRequestError extends Error {}
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+function decodeXml(value: string) {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&#(x[\da-f]+|\d+);/gi, (_, code: string) => {
+      const radix = code[0].toLowerCase() === "x" ? 16 : 10;
+      const number = Number.parseInt(code.slice(radix === 16 ? 1 : 0), radix);
+      return Number.isFinite(number) ? String.fromCodePoint(number) : "";
+    })
+    .replace(/&(amp|lt|gt|quot|apos);/g, (_, name: string) => ({
+      amp: "&",
+      lt: "<",
+      gt: ">",
+      quot: '"',
+      apos: "'",
+    }[name] ?? ""));
 }
 
-function finiteNumber(value: unknown, fallback = 0) {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+function xmlField(xml: string, tag: string) {
+  const match = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i"));
+  return match ? decodeXml(match[1]).trim() : "";
 }
 
-function redditUrl(path: string) {
-  if (!path.startsWith("/")) throw new FeedRequestError("Invalid Reddit permalink");
-  return new URL(path, "https://www.reddit.com").toString();
-}
-
-function safeOutboundUrl(value: unknown, fallback: string) {
-  if (typeof value !== "string") return fallback;
+function redditPermalink(value: string) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : fallback;
+    const hostname = url.hostname.toLowerCase();
+    if (!(hostname === "reddit.com" || hostname.endsWith(".reddit.com") || hostname === "redd.it")) {
+      throw new FeedRequestError("Invalid Reddit permalink");
+    }
+    if (!url.pathname.startsWith("/r/") && !url.pathname.startsWith("/comments/")) {
+      throw new FeedRequestError("Invalid Reddit permalink");
+    }
+    url.protocol = "https:";
+    return url.toString();
   } catch {
-    return fallback;
+    throw new FeedRequestError("Invalid Reddit permalink");
   }
 }
 
-function safeThumbnail(value: unknown) {
-  if (typeof value !== "string") return undefined;
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" ? url.toString() : undefined;
-  } catch {
-    return undefined;
-  }
+function postId(guid: string, permalink: string) {
+  const fromGuid = guid.replace(/^t3_/i, "").trim();
+  if (/^[a-z0-9]+$/i.test(fromGuid)) return fromGuid;
+  const match = new URL(permalink).pathname.match(/\/comments\/([^/]+)/i);
+  return match?.[1] ?? "";
 }
 
 export function normalizeSubreddit(value: string) {
@@ -72,47 +84,35 @@ export function parseFeedQuery(url: URL) {
   };
 }
 
-export function normalizeRedditListing(
-  payload: unknown,
-  subreddit: string,
-  sort: SortMode,
-): FeedResponse {
-  if (!isRecord(payload) || !isRecord(payload.data) || !Array.isArray(payload.data.children)) {
-    throw new FeedRequestError("Invalid Reddit listing");
+export function normalizeRssFeed(xml: string, subreddit: string, sort: SortMode): FeedResponse {
+  if (!/<rss(?:\s[^>]*)?>[\s\S]*<channel(?:\s[^>]*)?>/i.test(xml)) {
+    throw new FeedRequestError("Invalid Reddit RSS feed");
   }
 
   const posts: FeedPost[] = [];
-  for (const child of payload.data.children) {
-    if (!isRecord(child) || child.kind !== "t3" || !isRecord(child.data)) continue;
-    const post = child.data;
-    if (typeof post.id !== "string" || typeof post.title !== "string" || !post.title.trim()) continue;
-    if (typeof post.permalink !== "string") continue;
+  const items = xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) ?? [];
+  for (const item of items) {
+    const title = xmlField(item, "title");
+    const link = xmlField(item, "link");
+    const createdAt = new Date(xmlField(item, "pubDate"));
+    const permalink = (() => {
+      try {
+        return redditPermalink(link);
+      } catch {
+        return null;
+      }
+    })();
+    const id = permalink ? postId(xmlField(item, "guid"), permalink) : "";
+    if (!title || !permalink || !id || Number.isNaN(createdAt.valueOf())) continue;
 
-    let permalink: string;
-    try {
-      permalink = redditUrl(post.permalink);
-    } catch {
-      continue;
-    }
-
-    const createdUtc = finiteNumber(post.created_utc);
-    const createdAt = new Date(createdUtc * 1_000);
-    if (!createdUtc || Number.isNaN(createdAt.valueOf())) continue;
-
-    const normalized: FeedPost = {
-      id: post.id,
-      title: post.title.trim(),
-      author: typeof post.author === "string" && post.author ? post.author : "[deleted]",
-      score: finiteNumber(post.score),
-      commentCount: finiteNumber(post.num_comments),
+    posts.push({
+      id,
+      title,
+      author: xmlField(item, "dc:creator") || xmlField(item, "author") || "[deleted]",
       createdAt: createdAt.toISOString(),
       permalink,
-      outboundUrl: safeOutboundUrl(post.url, permalink),
-      isSelfPost: post.is_self === true,
-    };
-    const thumbnailUrl = safeThumbnail(post.thumbnail);
-    if (thumbnailUrl) normalized.thumbnailUrl = thumbnailUrl;
-    posts.push(normalized);
+      outboundUrl: permalink,
+    });
   }
 
   return { subreddit, sort, posts };
@@ -132,21 +132,6 @@ function errorResponse(status: number, code: string, message: string, headers?: 
   return json({ error: { code, message } }, status, headers);
 }
 
-async function readJson(response: Response) {
-  try {
-    return await response.json() as unknown;
-  } catch {
-    throw new FeedRequestError("Invalid Reddit response");
-  }
-}
-
-function configuredEnv(env: RedditEnv) {
-  const clientId = env.REDDIT_CLIENT_ID?.trim();
-  const clientSecret = env.REDDIT_CLIENT_SECRET?.trim();
-  const userAgent = env.REDDIT_USER_AGENT?.trim();
-  return clientId && clientSecret && userAgent ? { clientId, clientSecret, userAgent } : null;
-}
-
 export async function handleRedditFeedRequest(
   request: Request,
   env: RedditEnv,
@@ -163,44 +148,21 @@ export async function handleRedditFeedRequest(
     return errorResponse(400, "invalid_request", "Choose a valid subreddit, sort, and limit.");
   }
 
-  const config = configuredEnv(env);
-  if (!config) {
-    return errorResponse(503, "not_configured", "The Reddit feed is not configured yet.");
-  }
-
   try {
     const signal = AbortSignal.timeout(REDDIT_TIMEOUT_MS);
-    const basicCredentials = btoa(`${config.clientId}:${config.clientSecret}`);
-    const tokenResponse = await fetcher("https://www.reddit.com/api/v1/access_token", {
-      method: "POST",
+    const rssUrl = new URL(`https://www.reddit.com/r/${query.subreddit}/${query.sort}.rss`);
+    rssUrl.searchParams.set("limit", String(query.limit));
+    const response = await fetcher(rssUrl, {
       headers: {
-        Authorization: `Basic ${basicCredentials}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": config.userAgent,
-      },
-      body: "grant_type=client_credentials",
-      signal,
-    });
-    if (!tokenResponse.ok) throw new FeedRequestError("Reddit OAuth rejected the request");
-    const tokenPayload = await readJson(tokenResponse);
-    if (!isRecord(tokenPayload) || typeof tokenPayload.access_token !== "string" || !tokenPayload.access_token) {
-      throw new FeedRequestError("Invalid Reddit OAuth response");
-    }
-
-    const listingUrl = new URL(`https://oauth.reddit.com/r/${query.subreddit}/${query.sort}`);
-    listingUrl.searchParams.set("limit", String(query.limit));
-    listingUrl.searchParams.set("raw_json", "1");
-    const listingResponse = await fetcher(listingUrl, {
-      headers: {
-        Authorization: `Bearer ${tokenPayload.access_token}`,
-        "User-Agent": config.userAgent,
+        Accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8",
+        "User-Agent": env.REDDIT_USER_AGENT?.trim() || DEFAULT_USER_AGENT,
       },
       signal,
     });
-    if (!listingResponse.ok) throw new FeedRequestError("Reddit rejected the listing request");
-    const listing = normalizeRedditListing(await readJson(listingResponse), query.subreddit, query.sort);
+    if (!response.ok) throw new FeedRequestError("Reddit rejected the RSS request");
+    const feed = normalizeRssFeed(await response.text(), query.subreddit, query.sort);
 
-    return json(listing, 200, {
+    return json(feed, 200, {
       "Cache-Control": "public, max-age=60, s-maxage=120, stale-while-revalidate=300",
       "CDN-Cache-Control": "public, s-maxage=120, stale-while-revalidate=300",
     });
