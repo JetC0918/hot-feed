@@ -1,19 +1,19 @@
 import { getRankedPost, getSource, type SortMode } from "@/lib/feed-data";
 import { canRequestSummary } from "@/lib/entitlement";
 import { getRuntimeEnv } from "@/lib/runtime-env";
-import { readCookie, SESSION_COOKIE, verifySessionToken } from "@/lib/session";
-import { assertSummaryStore, getCachedSummary, putCachedSummary } from "@/lib/summary-cache";
-import { acquireSummaryLease, releaseSummaryLease } from "@/lib/summary-lease";
+import { readCookie, requireSessionSecret, SESSION_COOKIE, verifySessionToken } from "@/lib/session";
+import { assertSummaryStore, getCachedSummary, publishCachedSummaryAndRelease } from "@/lib/summary-cache";
+import { acquireSummaryLease, renewSummaryLease, releaseSummaryLease } from "@/lib/summary-lease";
 import { canonicalizeSourceUrl, fetchArticleExcerpt, hashUrl } from "@/lib/summary-security";
+import { assertRequestBoundary, readBoundedJson, RequestBoundaryError } from "@/lib/request-boundary";
+import { BoundedRateLimiter } from "@/lib/rate-limit";
 
 type SummaryPayload = { url?: unknown; title?: unknown; sourceId?: unknown; rank?: unknown; sortMode?: unknown };
 type SummaryResult = { summary: string; basis: "article" | "metadata" };
 
-const requestCounts = new Map<string, { count: number; resetAt: number }>();
 const inFlightSummaries = new Map<string, Promise<SummaryResult>>();
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const MAX_REQUESTS_PER_WINDOW = 20;
 const MAX_REQUEST_BODY_BYTES = 16_384;
+const limiter = new BoundedRateLimiter(60_000, 20);
 
 class SummaryGenerationError extends Error {
   constructor(readonly status: number, readonly code: string, readonly retryable: boolean, message: string) {
@@ -31,34 +31,22 @@ function clientKey(request: Request): string {
     || "unknown";
 }
 
-function isRateLimited(key: string): boolean {
-  const now = Date.now();
-  for (const [entryKey, record] of requestCounts) {
-    if (record.resetAt <= now) requestCounts.delete(entryKey);
-  }
-  const record = requestCounts.get(key);
-  if (!record || record.resetAt <= now) {
-    requestCounts.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return false;
-  }
-  record.count += 1;
-  return record.count > MAX_REQUESTS_PER_WINDOW;
-}
-
 async function generateSummary(
   runtime: ReturnType<typeof getRuntimeEnv>,
-  hash: string,
   canonicalUrl: string,
   sourceId: string,
   title: string,
   source: NonNullable<ReturnType<typeof getSource>>,
+  renew: () => Promise<void>,
 ): Promise<SummaryResult> {
   if (!runtime.API_KEY) throw new SummaryGenerationError(503, "not_configured", false, "AI summaries are not configured yet");
 
   let excerpt = "";
   let basis: "article" | "metadata" = "article";
+  await renew();
   try { excerpt = await fetchArticleExcerpt(canonicalUrl, sourceId); } catch { basis = "metadata"; }
   const context = excerpt || `Only metadata is available. Title: ${title}. Source: ${source.name}.`;
+  await renew();
 
   let upstream: Response;
   try {
@@ -84,11 +72,7 @@ async function generateSummary(
   const summary = result.choices?.[0]?.message?.content?.trim();
   if (!summary) throw new SummaryGenerationError(502, "empty_response", true, "The summary could not be generated");
 
-  try {
-    await putCachedSummary(runtime.DB, { hash, url: canonicalUrl, sourceId, title, summary, basis });
-  } catch {
-    throw new SummaryGenerationError(503, "cache_unavailable", true, "The summary service is temporarily unavailable");
-  }
+  await renew();
   return { summary, basis };
 }
 
@@ -96,59 +80,34 @@ function error(message: string, status: number, code: string, retryable = false)
   return Response.json({ error: message, code, retryable }, { status });
 }
 
-async function readBoundedJson(request: Request): Promise<unknown> {
-  const declaredLength = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
-    throw new Error("request_too_large");
-  }
-  if (!request.body) {
-    const bytes = new Uint8Array(await request.arrayBuffer());
-    if (bytes.byteLength > MAX_REQUEST_BODY_BYTES) throw new Error("request_too_large");
-    return JSON.parse(new TextDecoder().decode(bytes));
-  }
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX_REQUEST_BODY_BYTES) throw new Error("request_too_large");
-      chunks.push(value);
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-  const merged = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return JSON.parse(new TextDecoder().decode(merged));
-}
-
 export async function POST(request: Request) {
+  try { assertRequestBoundary(request, { method: "POST", mediaType: "json", maxBytes: MAX_REQUEST_BODY_BYTES }); }
+  catch (cause) { if (cause instanceof RequestBoundaryError) return error(cause.message, cause.status, cause.code, cause.status === 413); return error("Invalid request", 400, "invalid_request"); }
   let payload: SummaryPayload;
   try {
-    const parsed = await readBoundedJson(request);
+    const parsed = await readBoundedJson(request, MAX_REQUEST_BODY_BYTES);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return error("Invalid request", 400, "invalid_request");
     payload = parsed as SummaryPayload;
   } catch (cause) {
-    if (cause instanceof Error && cause.message === "request_too_large") return error("Request body is too large", 413, "request_too_large");
+    if (cause instanceof RequestBoundaryError && cause.status === 413) return error(cause.message, 413, cause.code, true);
     return error("Invalid request", 400, "invalid_request");
   }
   const { url, title, sourceId, rank, sortMode } = payload;
-  if (isRateLimited(clientKey(request))) return error("Too many summary requests. Try again later", 429, "rate_limited", true);
+  if (limiter.isLimited(clientKey(request))) return error("Too many summary requests. Try again later", 429, "rate_limited", true);
   if (typeof url !== "string" || typeof title !== "string" || typeof sourceId !== "string" || !Number.isInteger(rank) || Number(rank) < 1 || url.length > 2_048 || title.length > 500 || (sortMode !== "hot" && sortMode !== "new")) return error("Invalid request", 400, "invalid_request");
   const source = getSource(sourceId);
   if (!source) return error("Unknown feed source", 400, "invalid_source");
   const registeredPost = getRankedPost(sourceId, sortMode as SortMode, Number(rank));
   if (!registeredPost || registeredPost.url !== url || registeredPost.title !== title) return error("Post does not match this feed and rank", 400, "invalid_post");
   const runtime = getRuntimeEnv();
+  try { requireSessionSecret(runtime.SESSION_SECRET); } catch { return error("The summary service is not configured", 503, "not_configured"); }
   try { await assertSummaryStore(runtime.DB); } catch { return error("The summary service is temporarily unavailable", 503, "cache_unavailable", true); }
-  const authenticated = await verifySessionToken(readCookie(request, SESSION_COOKIE), runtime.SESSION_SECRET);
+  const sessionToken = readCookie(request, SESSION_COOKIE);
+  const authenticated = await verifySessionToken(sessionToken, runtime.SESSION_SECRET);
+  // A stale/invalid session cookie is authoritative evidence that a client
+  // which believed it was signed in must refresh its auth epoch. Anonymous
+  // requests without a cookie remain eligible for the guest top-three path.
+  if (sessionToken && !authenticated) return error("Your session has expired. Sign in again", 401, "session_expired");
   if (!canRequestSummary(authenticated, Number(rank))) return error("Sign in to summarize posts beyond the top three", 403, "sign_in_required");
   let canonicalUrl: string;
   try { canonicalUrl = canonicalizeSourceUrl(url, sourceId); } catch { return error("This link cannot be summarized safely", 400, "invalid_url"); }
@@ -176,10 +135,33 @@ export async function POST(request: Request) {
       throw new SummaryGenerationError(503, "coordination_unavailable", true, "The summary service is temporarily unavailable");
     }
     if (!acquired) throw new SummaryInProgressError();
+    let retainLease = false;
     try {
-      return await generateSummary(runtime, hash, canonicalUrl, sourceId, title, source);
+      const renew = async () => {
+        if (!await renewSummaryLease(runtime.DB, hash, leaseId)) throw new SummaryGenerationError(409, "summary_in_progress", true, "This summary is already being generated. Try again shortly");
+      };
+      await renew();
+      let postLease: Awaited<ReturnType<typeof getCachedSummary>>;
+      try { postLease = await getCachedSummary(runtime.DB, hash); }
+      catch { throw new SummaryGenerationError(503, "cache_unavailable", true, "The summary service is temporarily unavailable"); }
+      if (postLease) {
+        await releaseSummaryLease(runtime.DB, hash, leaseId);
+        return postLease;
+      }
+      const result = await generateSummary(runtime, canonicalUrl, sourceId, title, source, renew);
+      try {
+        await publishCachedSummaryAndRelease(runtime.DB, { hash, url: canonicalUrl, sourceId, title, summary: result.summary, basis: result.basis }, leaseId);
+      } catch {
+        throw new SummaryGenerationError(503, "cache_unavailable", true, "The summary service is temporarily unavailable");
+      }
+      return result;
+    } catch (cause) {
+      retainLease = cause instanceof SummaryGenerationError && cause.code === "cache_unavailable";
+      throw cause;
     } finally {
-      try { await releaseSummaryLease(runtime.DB, hash, leaseId); } catch { /* stale leases expire automatically */ }
+      if (!retainLease) {
+        try { await releaseSummaryLease(runtime.DB, hash, leaseId); } catch { /* stale leases expire automatically */ }
+      }
     }
   })();
   inFlightSummaries.set(hash, generation);

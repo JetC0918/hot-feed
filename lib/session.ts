@@ -1,5 +1,15 @@
 export const SESSION_COOKIE = "hotfeed_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 12;
+export const SESSION_SECRET_MIN_LENGTH = 32;
+
+export class SessionConfigurationError extends Error {
+  constructor() { super("Session authentication is not configured"); }
+}
+
+export function requireSessionSecret(secret: string | undefined) {
+  if (!secret || secret.length < SESSION_SECRET_MIN_LENGTH) throw new SessionConfigurationError();
+  return secret;
+}
 
 const encoder = new TextEncoder();
 
@@ -24,18 +34,20 @@ export function constantTimeEqual(left: string, right: string) {
 }
 
 export async function createSessionToken(secret: string, now = Date.now()) {
+  requireSessionSecret(secret);
   const payload = `prototype.${Math.floor(now / 1000) + SESSION_TTL_SECONDS}`;
   return `${payload}.${await signature(payload, secret)}`;
 }
 
 export async function verifySessionToken(token: string | undefined, secret: string | undefined, now = Date.now()) {
-  if (!token || !secret) return false;
+  if (!token) return false;
+  const validSecret = requireSessionSecret(secret);
   const parts = token.split(".");
   if (parts.length !== 3 || parts[0] !== "prototype") return false;
   const payload = `${parts[0]}.${parts[1]}`;
   const expiry = Number(parts[1]);
   if (!Number.isSafeInteger(expiry) || expiry <= Math.floor(now / 1000)) return false;
-  return constantTimeEqual(parts[2], await signature(payload, secret));
+  return constantTimeEqual(parts[2], await signature(payload, validSecret));
 }
 
 export function readCookie(request: Request, name: string) {

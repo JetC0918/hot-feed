@@ -1,0 +1,35 @@
+name: HotFeed CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - name: Verify D1 migrations
+        shell: bash
+        run: |
+          test -s drizzle/0000_closed_jazinda.sql
+          test -s drizzle/0001_fixed_purple_man.sql
+          grep -q 'CREATE TABLE.*summary_cache' drizzle/0000_closed_jazinda.sql
+          grep -q 'CREATE TABLE.*summary_generation_lease' drizzle/0001_fixed_purple_man.sql
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Scan client artifacts for server secrets
+        shell: bash
+        run: |
+          if grep -R -n -E 'API_KEY|PROTOTYPE_AUTH_EMAIL|PROTOTYPE_AUTH_PASSWORD|SESSION_SECRET' dist/client; then
+            echo 'server-only environment key leaked into client artifact' >&2
+            exit 1
+          fi

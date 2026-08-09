@@ -80,6 +80,39 @@ export const FEED_SOURCES: readonly FeedSource[] = [
 export const DEFAULT_SOURCE_IDS = ["reddit-technology"] as const;
 export const AUTHENTICATED_SOURCE_IDS = FEED_SOURCES.slice(0, 10).map((item) => item.id);
 
+export const SOURCE_SELECTION_VERSION = 2;
+
+export function isKnownSourceId(sourceId: string) {
+  return FEED_SOURCES.some((source) => source.id === sourceId)
+    || /^custom-reddit-[a-z0-9_]{2,21}$/.test(sourceId);
+}
+
+export function normalizePersistedSourceIds(value: unknown, fallback: readonly string[] = DEFAULT_SOURCE_IDS) {
+  const raw = Array.isArray(value)
+    ? value // Legacy v1 representation; migrate it into the current shape on write.
+    : value && typeof value === "object"
+      && (value as { version?: unknown }).version === SOURCE_SELECTION_VERSION
+      && Array.isArray((value as { sourceIds?: unknown }).sourceIds)
+      ? (value as { sourceIds: unknown[] }).sourceIds
+      : [];
+  const ids = [...new Set(raw.filter((id): id is string => typeof id === "string" && isKnownSourceId(id)))];
+  return ids.length ? ids : [...fallback];
+}
+
+export function contrastForeground(hex: string) {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!match) return "#fff";
+  const [r, g, b] = [0, 2, 4].map((offset) => Number.parseInt(match[1].slice(offset, offset + 2), 16) / 255)
+    .map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const contrast = (foreground: number) => (Math.max(luminance, foreground) + 0.05) / (Math.min(luminance, foreground) + 0.05);
+  const white = contrast(1);
+  if (white >= 4.5) return "#fff";
+  const dark = contrast(0.008);
+  if (dark >= 4.5) return "#101827";
+  return "#000";
+}
+
 export function getSource(sourceId: string) {
   return FEED_SOURCES.find((item) => item.id === sourceId);
 }

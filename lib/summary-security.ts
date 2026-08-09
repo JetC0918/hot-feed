@@ -28,36 +28,55 @@ function htmlToText(html: string) {
     .replace(/<[^>]+>/g, " ").replace(/&(?:nbsp|amp|quot|#39);/g, " ").replace(/\s+/g, " ").trim();
 }
 
+async function cancelResponseBody(response: Response) {
+  await response.body?.cancel().catch(() => undefined);
+}
+
 export async function fetchArticleExcerpt(initialUrl: string, sourceId: string, fetcher: typeof fetch = fetch) {
   let current = canonicalizeSourceUrl(initialUrl, sourceId);
   for (let redirect = 0; redirect < 4; redirect += 1) {
     const response = await fetcher(current, { redirect: "manual", headers: { Accept: "text/html", "User-Agent": "HotFeed-Summary/1.0" }, signal: AbortSignal.timeout(7000) });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
-      if (!location) throw new Error("Invalid redirect");
+      if (!location) {
+        await cancelResponseBody(response);
+        throw new Error("Invalid redirect");
+      }
+      await cancelResponseBody(response);
       current = canonicalizeSourceUrl(new URL(location, current).toString(), sourceId);
       continue;
     }
-    if (!response.ok) throw new Error("Article unavailable");
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new Error("Article unavailable");
+    }
     const contentType = (response.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0].trim();
-    if (contentType !== "text/html" && contentType !== "application/xhtml+xml") throw new Error("Article is not HTML");
+    if (contentType !== "text/html" && contentType !== "application/xhtml+xml") {
+      await cancelResponseBody(response);
+      throw new Error("Article is not HTML");
+    }
     const contentLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(contentLength) && contentLength > 150_000) throw new Error("Article is too large");
+    if (Number.isFinite(contentLength) && contentLength > 150_000) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error("Article is too large");
+    }
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Article body unavailable");
     const chunks: Uint8Array[] = [];
     let size = 0;
-    while (size < 150_000) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 150_000) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error("Article is too large");
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 150_000) {
+          throw new Error("Article is too large");
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+    } finally {
+      await reader.cancel().catch(() => undefined);
     }
-    await reader.cancel().catch(() => undefined);
     const merged = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
     let offset = 0;
     for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }

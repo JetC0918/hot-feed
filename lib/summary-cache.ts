@@ -1,6 +1,10 @@
 export type SummaryRecord = { summary: string; basis: "article" | "metadata" };
 
-type D1Like = { prepare(query: string): { bind(...values: unknown[]): { first<T>(): Promise<T | null>; run(): Promise<unknown> } } };
+export type D1Statement = { bind(...values: unknown[]): { first<T>(): Promise<T | null>; run(): Promise<unknown> } };
+export type D1Like = {
+  prepare(query: string): D1Statement;
+  batch?: (statements: unknown[]) => Promise<unknown>;
+};
 
 export class SummaryStoreUnavailableError extends Error {
   constructor() {
@@ -25,4 +29,26 @@ export async function putCachedSummary(db: D1Like | undefined, values: { hash: s
   const now = Date.now();
   await db.prepare("INSERT INTO summary_cache (url_hash, canonical_url, source_id, title, summary, basis, created_at, last_accessed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) ON CONFLICT(url_hash) DO UPDATE SET summary = excluded.summary, basis = excluded.basis, last_accessed_at = excluded.last_accessed_at")
     .bind(values.hash, values.url, values.sourceId, values.title, values.summary, values.basis, now).run();
+}
+
+/** Publish and release in one D1 batch when available; failure leaves ownership intact. */
+export async function publishCachedSummaryAndRelease(
+  db: D1Like | undefined,
+  values: { hash: string; url: string; sourceId: string; title: string; summary: string; basis: string },
+  leaseId: string,
+) {
+  if (!db) throw new SummaryStoreUnavailableError();
+  const now = Date.now();
+  const write = db.prepare("INSERT INTO summary_cache (url_hash, canonical_url, source_id, title, summary, basis, created_at, last_accessed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) ON CONFLICT(url_hash) DO UPDATE SET summary = excluded.summary, basis = excluded.basis, last_accessed_at = excluded.last_accessed_at")
+    .bind(values.hash, values.url, values.sourceId, values.title, values.summary, values.basis, now);
+  const release = db.prepare("DELETE FROM summary_generation_lease WHERE url_hash = ?1 AND lease_id = ?2")
+    .bind(values.hash, leaseId);
+  if (db.batch) {
+    await db.batch([write, release]);
+    return;
+  }
+  // Local fakes may not expose batch; retain the documented ordering and only
+  // release after a successful publication.
+  await write.run();
+  await release.run();
 }

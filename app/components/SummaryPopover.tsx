@@ -7,6 +7,13 @@ import type { FeedPost, SortMode } from "@/lib/feed-data";
 type SummaryState = { status: "idle" | "loading" | "loaded" | "error"; summary?: string; basis?: string; error?: string; retryable?: boolean };
 const cache = new Map<string, SummaryState>();
 const pending = new Map<string, Promise<SummaryState>>();
+let cacheGeneration = 0;
+
+export function clearSummaryCache() {
+  cacheGeneration += 1;
+  cache.clear();
+  pending.clear();
+}
 
 export function SummaryPopover({ post, sourceId, rank, sortMode, eligible, children }: { post: FeedPost; sourceId: string; rank: number; sortMode: SortMode; eligible: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -15,20 +22,27 @@ export function SummaryPopover({ post, sourceId, rank, sortMode, eligible, child
 
   const load = async () => {
     if (!eligible || state.status === "loading" || state.status === "loaded") return;
+    const generation = cacheGeneration;
     const loading: SummaryState = { status: "loading" };
     setState(loading);
     let request = pending.get(post.url);
     if (!request) {
-      request = (async (): Promise<SummaryState> => {
+      let tracked: Promise<SummaryState> = (async (): Promise<SummaryState> => {
         try {
           const response = await fetch("/api/summary", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: post.url, title: post.title, sourceId, rank, sortMode }) });
           const data = await response.json() as { summary?: string; basis?: string; error?: string; retryable?: boolean };
+          if (response.status === 401 || response.status === 403) window.dispatchEvent(new Event("hotfeed:auth-expired"));
           return response.ok && data.summary ? { status: "loaded", summary: data.summary, basis: data.basis } : { status: "error", error: data.error ?? "Summary unavailable", retryable: data.retryable };
         } catch { return { status: "error", error: "Summary unavailable", retryable: true }; }
-      })().finally(() => pending.delete(post.url));
+      })();
+      tracked = tracked.finally(() => {
+        if (pending.get(post.url) === tracked) pending.delete(post.url);
+      });
+      request = tracked;
       pending.set(post.url, request);
     }
     const next = await request;
+    if (generation !== cacheGeneration) return;
     cache.set(post.url, next); setState(next);
   };
 

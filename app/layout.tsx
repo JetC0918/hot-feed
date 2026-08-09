@@ -10,6 +10,7 @@ const geist = Geist({
 export const metadata: Metadata = {
   title: "HotFeed - Your Personal Trend Radar",
   description: "A fast, focused Reddit technology trend aggregator.",
+  icons: { icon: "/favicon.svg" },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

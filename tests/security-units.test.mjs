@@ -4,8 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { canRequestSummary } from "../lib/entitlement.ts";
-import { getRankedPost } from "../lib/feed-data.ts";
+import { contrastForeground, getRankedPost, normalizePersistedSourceIds } from "../lib/feed-data.ts";
 import { constantTimeEqual, createSessionToken, verifySessionToken } from "../lib/session.ts";
+import { assertEmptyBody, RequestBoundaryError } from "../lib/request-boundary.ts";
 import { canonicalizeSourceUrl, fetchArticleExcerpt } from "../lib/summary-security.ts";
 
 test("signed sessions verify, reject tampering, and expire", async () => {
@@ -37,6 +38,20 @@ test("feed rank is derived from the registered server fixture and sort mode", ()
   assert.equal(getRankedPost("unknown", "hot", 1), null);
 });
 
+test("persisted source selections retain valid custom communities and remove duplicates/unknown IDs", () => {
+  assert.deepEqual(
+    normalizePersistedSourceIds({ version: 2, sourceIds: ["custom-reddit-webdev", "custom-reddit-webdev", "stale", "reddit-technology"] }),
+    ["custom-reddit-webdev", "reddit-technology"],
+  );
+  assert.deepEqual(normalizePersistedSourceIds({ version: 99, sourceIds: ["reddit-technology"] }), ["reddit-technology"]);
+  assert.deepEqual(normalizePersistedSourceIds(["custom-reddit-INVALID!"]), ["reddit-technology"]);
+});
+
+test("source badge foregrounds meet the reviewed contrast floor", () => {
+  assert.equal(contrastForeground("#25b8e6"), "#101827");
+  assert.equal(contrastForeground("#3478f6"), "#000");
+});
+
 test("canonical URLs enforce HTTPS, source ownership, and tracking removal", () => {
   assert.equal(canonicalizeSourceUrl("https://www.reddit.com/r/technology/?utm_source=test#comments", "reddit-technology"), "https://www.reddit.com/r/technology/");
   for (const url of ["http://www.reddit.com/story", "https://example.com/story", "https://127.0.0.1/story", "https://user:pass@www.reddit.com/story", "https://evil.www.reddit.com/story"]) {
@@ -53,6 +68,21 @@ test("article fetching revalidates redirects and rejects oversized HTML", async 
   await assert.rejects(
     fetchArticleExcerpt(sourceUrl, "reddit-technology", async () => new Response("short", { headers: { "content-type": "text/html", "content-length": "150001" } })),
     /too large/,
+  );
+});
+
+test("empty-body boundary drains chunked requests instead of stopping after two chunks", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array());
+      controller.enqueue(new Uint8Array());
+      controller.enqueue(new TextEncoder().encode("unexpected"));
+      controller.close();
+    },
+  });
+  await assert.rejects(
+    assertEmptyBody(new Request("https://hotfeed.test/api/auth/logout", { method: "POST", body: stream, duplex: "half" })),
+    (error) => error instanceof RequestBoundaryError && error.code === "body_not_allowed",
   );
 });
 
