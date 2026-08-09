@@ -1,121 +1,83 @@
 # HotFeed
 
-A guest-first trend dashboard running on [vinext](https://github.com/cloudflare/vinext).
-Guests see the default Reddit feed; prototype-authenticated users can customize a
-mixed dashboard and request on-demand AI summaries.
+HotFeed is a focused Reddit reader for viewing the hot or newest posts from a
+single subreddit. It is a static Vite + React site with one Cloudflare Pages
+Function that keeps Reddit OAuth credentials on the server.
 
-## Prerequisites
+## Requirements
 
 - Node.js `>=22.13.0`
+- A Reddit application with Data API access
+- A Cloudflare account for Pages deployment
 
-## Quick Start
+## Local setup
+
+Install dependencies:
 
 ```bash
 npm install
-npm run dev
-npm run build
 ```
 
-Create a local ignored `.env` (do not commit it) with these server-only names:
+Create an ignored `.dev.vars` file from `.env.example` and fill in the three
+server-only values:
 
 ```text
-PROTOTYPE_AUTH_EMAIL=
-PROTOTYPE_AUTH_PASSWORD=
-SESSION_SECRET=
-API_KEY=
+REDDIT_CLIENT_ID=
+REDDIT_CLIENT_SECRET=
+REDDIT_USER_AGENT=web:hot-feed:0.2.0 (by /u/your_reddit_username)
 ```
 
-Use a random `SESSION_SECRET` of at least 32 characters. Configure the same names
-as encrypted runtime secrets for production. None of these values may use a
-client-exposed prefix.
+Never prefix these names with `VITE_`; Vite exposes variables with that prefix
+to browser code.
 
-This starter does not use `wrangler.jsonc`.
+Run the full Pages application locally:
 
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares the `DB` D1 summary-cache binding
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` defines the D1-backed AI summary cache
-- `drizzle/0001_fixed_purple_man.sql` adds an atomic D1 lease so concurrent
-  requests for the same story cannot fan out to the AI provider
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+npm run pages:dev
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+`npm run dev` starts the Vite client only and is useful for UI work when an API
+proxy is already available.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+## Cloudflare Pages deployment
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+Import this repository in **Workers & Pages → Create application → Pages** and
+use:
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+- Build command: `npm run build`
+- Build output directory: `dist`
+- Root directory: leave blank
+- Node version: 22
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+Add `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, and `REDDIT_USER_AGENT` under
+the Pages project's **Settings → Variables and Secrets** for both production
+and preview environments. No D1 database or binding is required.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+Cloudflare automatically deploys `functions/api/reddit.ts` alongside the static
+assets. You can also deploy from an authenticated local Wrangler session:
 
-## Useful Commands
+```bash
+npm run deploy
+```
 
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the app and run rendered-HTML and security-focused tests
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+## Commands
 
-Summary requests are limited per client, coalesced within a worker isolate, and
-guarded by the D1 `summary_generation_lease` table across isolates. Apply all
-Drizzle migrations before deploying. Keep a shared edge/API quota in front of
-the Worker as an additional budget control; the in-process limiter is not a
-replacement for a distributed gateway limit.
+- `npm run dev` — run the Vite client
+- `npm run pages:dev` — build and run Pages plus the Reddit function locally
+- `npm test` — run API, UI, and deployment contract tests
+- `npm run lint` — lint the project
+- `npm run typecheck` — type-check without emitting files
+- `npm run build` — produce the static `dist` directory
+- `npm run deploy` — build and deploy to the `hot-feed` Pages project
 
-## Learn More
+## API
 
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+`GET /api/reddit?subreddit=technology&sort=hot&limit=25`
+
+- `subreddit`: 2–21 letters, numbers, or underscores; `r/` is accepted
+- `sort`: `hot` or `new`
+- `limit`: 1–50
+
+Successful Reddit responses are normalized to a small browser-safe contract and
+cached at the edge for two minutes. Upstream bodies and credentials are never
+included in error responses.
