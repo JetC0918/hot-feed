@@ -36,3 +36,9 @@ test("client renders the focused Reddit feed controls without legacy gates", asy
     await vite.close();
   }
 });
+
+test("client versions feed requests so stale edge errors cannot persist across deployments", async () => {
+  const source = await readFile(path.join(root, "app/page.tsx"), "utf8");
+  assert.match(source, /feedVersion/);
+  assert.match(source, /feedVersion\s*:\s*["']2["']/);
+});

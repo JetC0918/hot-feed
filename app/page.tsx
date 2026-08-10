@@ -32,7 +32,7 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ subreddit, sort, limit: "25" });
+    const params = new URLSearchParams({ subreddit, sort, limit: "25", feedVersion: "2" });
 
     fetch(`/api/reddit?${params}`, { signal: controller.signal })
       .then(async (response) => {
