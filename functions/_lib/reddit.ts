@@ -36,6 +36,11 @@ function xmlField(xml: string, tag: string) {
   return match ? decodeXml(match[1]).trim() : "";
 }
 
+function xmlAttribute(xml: string, tag: string, attribute: string) {
+  const match = xml.match(new RegExp(`<${tag}\\b[^>]*\\b${attribute}=["']([^"']+)["']`, "i"));
+  return match ? decodeXml(match[1]).trim() : "";
+}
+
 function redditPermalink(value: string) {
   try {
     const url = new URL(value);
@@ -85,16 +90,19 @@ export function parseFeedQuery(url: URL) {
 }
 
 export function normalizeRssFeed(xml: string, subreddit: string, sort: SortMode): FeedResponse {
-  if (!/<rss(?:\s[^>]*)?>[\s\S]*<channel(?:\s[^>]*)?>/i.test(xml)) {
+  const isAtom = /<feed(?:\s[^>]*)?>[\s\S]*<entry(?:\s[^>]*)?>/i.test(xml);
+  const isRss = /<rss(?:\s[^>]*)?>[\s\S]*<channel(?:\s[^>]*)?>/i.test(xml);
+  if (!isAtom && !isRss) {
     throw new FeedRequestError("Invalid Reddit RSS feed");
   }
 
   const posts: FeedPost[] = [];
-  const items = xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) ?? [];
+  const itemTag = isAtom ? "entry" : "item";
+  const items = xml.match(new RegExp(`<${itemTag}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${itemTag}>`, "gi")) ?? [];
   for (const item of items) {
     const title = xmlField(item, "title");
-    const link = xmlField(item, "link");
-    const createdAt = new Date(xmlField(item, "pubDate"));
+    const link = isAtom ? xmlAttribute(item, "link", "href") : xmlField(item, "link");
+    const createdAt = new Date(xmlField(item, isAtom ? "published" : "pubDate") || xmlField(item, "updated"));
     const permalink = (() => {
       try {
         return redditPermalink(link);
@@ -108,7 +116,9 @@ export function normalizeRssFeed(xml: string, subreddit: string, sort: SortMode)
     posts.push({
       id,
       title,
-      author: xmlField(item, "dc:creator") || xmlField(item, "author") || "[deleted]",
+      author: isAtom
+        ? xmlField(item, "name") || "[deleted]"
+        : xmlField(item, "dc:creator") || xmlField(item, "author") || "[deleted]",
       createdAt: createdAt.toISOString(),
       permalink,
       outboundUrl: permalink,

@@ -21,6 +21,19 @@ const rssFeed = `<?xml version="1.0" encoding="UTF-8"?>
   </channel>
 </rss>`;
 
+const atomFeed = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>/r/webdev</title>
+  <entry>
+    <author><name>/u/builder</name></author>
+    <id>t3_atom123</id>
+    <published>2027-01-15T08:00:00+00:00</published>
+    <updated>2027-01-15T08:01:00+00:00</updated>
+    <title>A useful Atom release</title>
+    <link href="https://www.reddit.com/r/webdev/comments/atom123/a_useful_release/" />
+  </entry>
+</feed>`;
+
 test("feed query accepts Reddit names and bounds sort and limit", () => {
   assert.deepEqual(
     feed.parseFeedQuery(new URL("https://hotfeed.test/api/reddit?subreddit=r%2FWebDev&sort=new&limit=12")),
@@ -58,6 +71,23 @@ test("Reddit RSS entries are normalized into the browser feed contract", () => {
     ],
   });
   assert.throws(() => feed.normalizeRssFeed("<html>not RSS</html>", "webdev", "hot"), /invalid/i);
+});
+
+test("Reddit's Atom-shaped RSS response is normalized too", () => {
+  assert.deepEqual(feed.normalizeRssFeed(atomFeed, "webdev", "hot"), {
+    subreddit: "webdev",
+    sort: "hot",
+    posts: [
+      {
+        id: "atom123",
+        title: "A useful Atom release",
+        author: "/u/builder",
+        createdAt: "2027-01-15T08:00:00.000Z",
+        permalink: "https://www.reddit.com/r/webdev/comments/atom123/a_useful_release/",
+        outboundUrl: "https://www.reddit.com/r/webdev/comments/atom123/a_useful_release/",
+      },
+    ],
+  });
 });
 
 test("feed handler fetches RSS without OAuth and returns cacheable normalized data", async () => {
