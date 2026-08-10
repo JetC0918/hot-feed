@@ -74,6 +74,7 @@ npm run deploy
 - `sort`: `hot` or `new`
 - `limit`: 1–50
 
-Successful RSS responses are normalized to a small browser-safe contract and
-cached at the edge for two minutes. RSS does not reliably provide score or
-comment counts, so the UI links to the Reddit discussion instead.
+Successful RSS responses are normalized to a small browser-safe contract,
+cached at the edge for ten minutes, and retained as a 24-hour fallback when
+Reddit rate-limits a refresh. RSS does not reliably provide score or comment
+counts, so the UI links to the Reddit discussion instead.

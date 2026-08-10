@@ -108,3 +108,76 @@ test("Pages Function returns an edge-cached feed without contacting Reddit", asy
     else globalThis.caches = originalCaches;
   }
 });
+
+test("Pages Function canonicalizes cache keys to feed parameters", async () => {
+  const originalCaches = globalThis.caches;
+  const matchedUrls = [];
+  globalThis.caches = {
+    default: {
+      async match(request) {
+        matchedUrls.push(String(request.url ?? request));
+        return Response.json({ subreddit: "webdev", sort: "new", posts: [] });
+      },
+      async put() {},
+    },
+  };
+
+  try {
+    const moduleUrl = new URL("../functions/api/reddit.ts", import.meta.url);
+    moduleUrl.searchParams.set("canonical-test", `${process.pid}-${Date.now()}`);
+    const { onRequest } = await import(moduleUrl.href);
+    const response = await onRequest({
+      request: new Request("https://hotfeed.test/api/reddit?subreddit=r%2FWebDev&sort=new&limit=25&feedVersion=2&diagnostic=ignored"),
+      env: {},
+      waitUntil() {},
+    });
+    assert.equal(response.status, 200);
+    assert.equal(matchedUrls.length, 1);
+    assert.match(matchedUrls[0], /\/__hotfeed-cache\/fresh\?/);
+    assert.match(matchedUrls[0], /subreddit=webdev/);
+    assert.match(matchedUrls[0], /sort=new/);
+    assert.match(matchedUrls[0], /limit=25/);
+    assert.doesNotMatch(matchedUrls[0], /feedVersion|diagnostic/);
+  } finally {
+    if (originalCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = originalCaches;
+  }
+});
+
+test("Pages Function serves a stale successful feed when Reddit is rate-limited", async () => {
+  const originalCaches = globalThis.caches;
+  const originalFetch = globalThis.fetch;
+  const staleBody = { subreddit: "technology", sort: "new", posts: [{ id: "stale-post" }] };
+  const matchedUrls = [];
+  globalThis.caches = {
+    default: {
+      async match(request) {
+        const url = String(request.url ?? request);
+        matchedUrls.push(url);
+        return url.includes("/__hotfeed-cache/stale?") ? Response.json(staleBody) : undefined;
+      },
+      async put() {},
+    },
+  };
+  globalThis.fetch = async () => new Response("rate limited", { status: 429 });
+
+  try {
+    const moduleUrl = new URL("../functions/api/reddit.ts", import.meta.url);
+    moduleUrl.searchParams.set("stale-test", `${process.pid}-${Date.now()}`);
+    const { onRequest } = await import(moduleUrl.href);
+    const response = await onRequest({
+      request: new Request("https://hotfeed.test/api/reddit?subreddit=technology&sort=new&limit=25&feedVersion=2"),
+      env: {},
+      waitUntil() {},
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("X-HotFeed-Cache"), "STALE");
+    assert.match(response.headers.get("Warning") ?? "", /stale/i);
+    assert.deepEqual(await response.json(), staleBody);
+    assert.equal(matchedUrls.some((url) => url.includes("/__hotfeed-cache/stale?")), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = originalCaches;
+  }
+});
